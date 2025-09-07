@@ -2,6 +2,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
 from django.shortcuts import get_object_or_404
+from django.db import models
 from decimal import Decimal
 from datetime import date, timedelta
 from .models import Customer, Loan
@@ -42,7 +43,38 @@ def check_eligibility(request):
     loans_queryset = customer.loans.all()
     credit_score = calculate_credit_score(customer, loans_queryset)
     
-    # Determine approval and corrected interest rate
+    # Check if sum of current EMIs + proposed loan EMI > 50% of monthly salary
+    total_current_emis = loans_queryset.aggregate(
+        total_emi=models.Sum('monthly_repayment')
+    )['total_emi'] or Decimal('0.00')
+    
+    # Calculate proposed loan EMI (assuming worst case interest rate for estimation)
+    proposed_emi = calculate_emi(data['loan_amount'], Decimal('16.00'), data['tenure'])
+    total_emi_burden = total_current_emis + proposed_emi
+    
+    max_allowed_emi = customer.monthly_salary * Decimal('0.50')  # 50% of monthly salary
+    
+    # If total EMI burden exceeds 50% of salary, don't approve
+    if total_emi_burden > max_allowed_emi:
+        approval = False
+        corrected_interest_rate = data['interest_rate']
+        monthly_installment = Decimal('0.00')
+        
+        response_data = {
+            'customer_id': data['customer_id'],
+            'approval': False,
+            'interest_rate': data['interest_rate'],
+            'corrected_interest_rate': corrected_interest_rate,
+            'tenure': data['tenure'],
+            'monthly_installment': monthly_installment
+        }
+        
+        response_serializer = CheckEligibilityResponseSerializer(data=response_data)
+        if response_serializer.is_valid():
+            return Response(response_serializer.data, status=status.HTTP_200_OK)
+        return Response(response_serializer.errors, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    # Determine approval and corrected interest rate based on credit score
     approval = False
     corrected_interest_rate = data['interest_rate']
     
@@ -103,6 +135,35 @@ def create_loan(request):
     # Check eligibility
     loans_queryset = customer.loans.all()
     credit_score = calculate_credit_score(customer, loans_queryset)
+    
+    # Check if sum of current EMIs + proposed loan EMI > 50% of monthly salary
+    total_current_emis = loans_queryset.aggregate(
+        total_emi=models.Sum('monthly_repayment')
+    )['total_emi'] or Decimal('0.00')
+    
+    # Calculate proposed loan EMI (assuming worst case interest rate)
+    proposed_emi = calculate_emi(data['loan_amount'], Decimal('16.00'), data['tenure'])
+    total_emi_burden = total_current_emis + proposed_emi
+    
+    max_allowed_emi = customer.monthly_salary * Decimal('0.50')  # 50% of monthly salary
+    
+    # If total EMI burden exceeds 50% of salary, don't approve
+    if total_emi_burden > max_allowed_emi:
+        approval = False
+        message = "Loan not approved: current EMIs exceed 50% of monthly salary"
+        
+        response_data = {
+            'loan_id': None,
+            'customer_id': data['customer_id'],
+            'loan_approved': False,
+            'message': message,
+            'monthly_installment': Decimal('0.00')
+        }
+        
+        response_serializer = CreateLoanResponseSerializer(data=response_data)
+        if response_serializer.is_valid():
+            return Response(response_serializer.data, status=status.HTTP_200_OK)
+        return Response(response_serializer.errors, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     # Determine approval and corrected interest rate (same logic as check_eligibility)
     approval = False
